@@ -131,6 +131,8 @@ func Struct(ctx context.Context, typ attr.Type, object tftypes.Value, target ref
 			return target, diags
 		}
 
+		// TODO: this currently doesn't support pointers, if the field is an embedded struct pointer then it will panic
+		// We could safely exit by using FieldByIndexErr, but we need to decide if we want to support embedded pointer structs
 		structField := result.FieldByIndex(fieldIndex)
 
 		fieldVal, fieldValDiags := BuildValue(ctx, attrType, objectFields[field], structField, opts, path.AtName(field))
@@ -215,6 +217,8 @@ func FromStruct(ctx context.Context, typ attr.TypeWithAttributeTypes, val reflec
 
 	for name, fieldIndex := range targetFields {
 		path := path.AtName(name)
+		// TODO: this currently doesn't support pointers, if the field is an embedded struct pointer then it will panic
+		// We could safely exit by using FieldByIndexErr, but we need to decide if we want to support embedded pointer structs
 		fieldValue := val.FieldByIndex(fieldIndex)
 
 		// If the attr implements xattr.ValidateableAttribute, or xattr.TypeWithValidate,
