@@ -5,10 +5,13 @@ package reflect
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 )
 
@@ -16,58 +19,149 @@ type SimpleStruct struct {
 	Field1 string `tfsdk:"field1"`
 	Field2 int    `tfsdk:"field2"`
 	Field3 bool   `tfsdk:"field3"`
+	Field4 string `tfsdk:"-"`
+
+	unexported          string //nolint:structcheck,unused
+	unexportedAndTagged string `tfsdk:"unexported_and_tagged"`
 }
 
-type ComplexStruct struct {
-	SimpleStruct
-	Field4 string `tfsdk:"field4"`
+type StructWithInvalidTag struct {
+	InvalidField string `tfsdk:"*()-"`
 }
 
 func TestGetStructTags(t *testing.T) {
 	t.Parallel()
-	ctx := context.TODO()
-	tests := []struct {
-		name          string
-		in            interface{}
-		expectedTags  map[string]int
-		expectedError string
+
+	testCases := map[string]struct {
+		in            any
+		expectedTags  map[string][]int
+		expectedError error
 	}{
-		{
-			name: "SimpleStruct",
-			in:   SimpleStruct{},
-			expectedTags: map[string]int{
-				"field1": 0,
-				"field2": 1,
-				"field3": 2,
+		"struct": {
+			in: SimpleStruct{},
+			expectedTags: map[string][]int{
+				"field1": {0},
+				"field2": {1},
+				"field3": {2},
 			},
-			expectedError: "",
 		},
-		{
-			name: "ComplexStruct",
-			in:   ComplexStruct{},
-			expectedTags: map[string]int{
-				"field1": 0,
-				"field2": 1,
-				"field3": 2,
-				"field4": 1,
+		"struct-err-duplicate-fields": {
+			in: struct {
+				Field1 string `tfsdk:"field1"`
+				Field2 string `tfsdk:"field1"`
+			}{},
+			expectedError: errors.New(`field1: can't use field name for both Field1 and Field2`),
+		},
+		"struct-err-invalid-field": {
+			in:            StructWithInvalidTag{},
+			expectedError: errors.New(`*()-: invalid field name, must only use lowercase letters, underscores, and numbers, and must start with a letter`),
+		},
+		"embedded-struct": {
+			in: struct {
+				SimpleStruct
+				Field5 string `tfsdk:"field5"`
+			}{},
+			expectedTags: map[string][]int{
+				"field1": {0, 0},
+				"field2": {0, 1},
+				"field3": {0, 2},
+				"field5": {1},
 			},
-			expectedError: "",
+		},
+		"embedded-struct-unexported": {
+			in: struct {
+				SimpleStruct
+				Field5 string `tfsdk:"field5"`
+
+				unexported          string //nolint:structcheck,unused
+				unexportedAndTagged string `tfsdk:"unexported_and_tagged"`
+			}{},
+			expectedTags: map[string][]int{
+				"field1": {0, 0},
+				"field2": {0, 1},
+				"field3": {0, 2},
+				"field5": {1},
+			},
+		},
+		"embedded-struct-err-duplicate-fields": {
+			in: struct {
+				Field1       string `tfsdk:"field1"`
+				SimpleStruct        // Contains a `tfsdk:"field1"`
+			}{},
+			expectedError: errors.New(`embedded struct "SimpleStruct" contains a duplicate field name "Field1"`),
+		},
+		"embedded-struct-err-invalid": {
+			in: struct {
+				StructWithInvalidTag // Contains an invalid "tfsdk" tag
+			}{},
+			expectedError: errors.New(`StructWithInvalidTag: failed to process embedded struct: *()-: invalid field name, must only use lowercase letters, underscores, and numbers, and must start with a letter`),
+		},
+		"embedded-struct-ptr": {
+			in: struct {
+				*SimpleStruct
+				Field5 string `tfsdk:"field5"`
+			}{},
+			expectedTags: map[string][]int{
+				"field1": {0, 0},
+				"field2": {0, 1},
+				"field3": {0, 2},
+				"field5": {1},
+			},
+		},
+		"embedded-struct-ptr-unexported": {
+			in: struct {
+				SimpleStruct
+				Field5 string `tfsdk:"field5"`
+
+				unexported          string //nolint:structcheck,unused
+				unexportedAndTagged string `tfsdk:"unexported_and_tagged"`
+			}{},
+			expectedTags: map[string][]int{
+				"field1": {0, 0},
+				"field2": {0, 1},
+				"field3": {0, 2},
+				"field5": {1},
+			},
+		},
+		"embedded-struct-ptr-err-duplicate-fields": {
+			in: struct {
+				Field1        string `tfsdk:"field1"`
+				*SimpleStruct        // Contains a `tfsdk:"field1"`
+			}{},
+			expectedError: errors.New(`embedded struct "SimpleStruct" contains a duplicate field name "Field1"`),
+		},
+		"embedded-struct-ptr-err-invalid": {
+			in: struct {
+				*StructWithInvalidTag // Contains an invalid "tfsdk" tag
+			}{},
+			expectedError: errors.New(`StructWithInvalidTag: failed to process embedded struct: *()-: invalid field name, must only use lowercase letters, underscores, and numbers, and must start with a letter`),
 		},
 	}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			tags, err := getStructTags(ctx, reflect.ValueOf(tc.in), path.Empty())
-			if tc.expectedError != "" {
-				t.Errorf("Expected Error: %q, got: %q", tc.expectedError, err)
-			} else {
-				for i := range tc.expectedTags {
-					_, ok := tags[i]
-					if !ok {
-						t.Errorf("Expected Tag: %q", i)
-					}
+	for name, testCase := range testCases {
+		name, testCase := name, testCase
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			tags, err := getStructTags(context.Background(), reflect.TypeOf(testCase.in), path.Empty())
+			if err != nil {
+				if testCase.expectedError == nil {
+					t.Fatalf("expected no error, got: %s", err)
+				}
+
+				if !strings.Contains(err.Error(), testCase.expectedError.Error()) {
+					t.Fatalf("expected error %q, got: %s", testCase.expectedError, err)
 				}
 			}
+
+			if err == nil && testCase.expectedError != nil {
+				t.Fatalf("got no error, expected: %s", testCase.expectedError)
+			}
+
+			if diff := cmp.Diff(tags, testCase.expectedTags); diff != "" {
+				t.Errorf("unexpected difference: %s", diff)
+			}
+
 		})
 	}
 }
